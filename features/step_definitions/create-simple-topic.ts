@@ -3,12 +3,14 @@ import {
   AccountBalanceQuery,
   AccountId,
   Client,
+  KeyList,
   PrivateKey,
   RequestType,
   TopicCreateTransaction,
   TopicInfoQuery,
   TopicMessageQuery,
   TopicMessageSubmitTransaction,
+  AccountCreateTransaction,
 } from "@hashgraph/sdk";
 import { accounts } from "../../src/config";
 import assert from "node:assert";
@@ -128,14 +130,65 @@ Then(
   }
 );
 
-Given(/^A second account with more than (\d+) hbars$/, async function () {});
+Given(
+  /^A second account with more than (\d+) hbars$/,
+  async function (expectedBalance: number) {
+    const acc = accounts[1];
+    const account: AccountId = AccountId.fromString(acc.id);
+    this.account = account;
+    const privKey: PrivateKey = PrivateKey.fromStringED25519(acc.privateKey);
+    this.privKey2 = privKey;
+
+    const query = new AccountBalanceQuery().setAccountId(account);
+    const balance = await query.execute(client);
+
+    assert.ok(balance.hbars.toBigNumber().toNumber() > expectedBalance);
+  }
+);
 
 Given(
   /^A (\d+) of (\d+) threshold key with the first and second account$/,
-  async function () {}
+  async function (threshold: number, total: number) {
+    this.thresholdKey = new KeyList(
+      [this.privKey.publicKey, this.privKey2.publicKey],
+      threshold
+    );
+
+    const transaction = new AccountCreateTransaction()
+      .setKey(this.thresholdKey)
+      .setInitialBalance(1000);
+
+    const response = await transaction.execute(client);
+    const receipt = await response.getReceipt(client);
+    const newAccountId = receipt.accountId;
+
+    console.log("New Account ID with Threshold Key:", newAccountId?.toString());
+  }
 );
 
 When(
   /^A topic is created with the memo "([^"]*)" with the threshold key as the submit key$/,
-  async function () {}
+  async function (memo: string) {
+    const topicCreateTx = new TopicCreateTransaction()
+      .setTopicMemo(memo)
+      .freezeWith(client);
+
+    const topicCreateTxId = topicCreateTx.transactionId;
+
+    console.log(
+      "Threshold Key topic create transaction ID: ",
+      topicCreateTxId?.toString()
+    );
+
+    const topicCreateTxSigned = await topicCreateTx.sign(this.thresholdKey);
+
+    const topicCreateTxSubmitted = await topicCreateTxSigned.execute(client);
+
+    const topicCreateTxReceipt = await topicCreateTxSubmitted.getReceipt(
+      client
+    );
+
+    this.topicId = topicCreateTxReceipt.topicId;
+    console.log("topicId:", this.topicId?.toString());
+  }
 );
