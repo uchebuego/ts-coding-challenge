@@ -95,7 +95,37 @@ When(
 
 Then(
   /^The message "([^"]*)" is received by the topic and can be printed to the console$/,
-  async function (message: string) {}
+  async function (message: string) {
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        subscription.unsubscribe();
+        reject(new Error("Timeout waiting for message"));
+      }, 4000);
+
+      const subscription = new TopicMessageQuery()
+        .setTopicId(this.topicId)
+        .setStartTime(0)
+        .subscribe(
+          client,
+          (error) => {
+            clearTimeout(timeout);
+            subscription.unsubscribe();
+            reject(error);
+          },
+          (msg) => {
+            const messageContent = Buffer.from(msg.contents).toString();
+            console.log("messageContent: ", messageContent);
+
+            if (messageContent === message) {
+              clearTimeout(timeout);
+              subscription.unsubscribe();
+              assert.strictEqual(messageContent, message);
+              resolve(true);
+            }
+          }
+        );
+    });
+  }
 );
 
 Given(/^A second account with more than (\d+) hbars$/, async function () {});
