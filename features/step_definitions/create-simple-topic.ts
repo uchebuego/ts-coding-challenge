@@ -58,14 +58,39 @@ When(
       client
     );
 
-    const topicId = topicCreateTxReceipt.topicId;
-    console.log("topicId:", topicId?.toString());
+    this.topicId = topicCreateTxReceipt.topicId;
+    console.log("topicId:", this.topicId?.toString());
   }
 );
 
 When(
   /^The message "([^"]*)" is published to the topic$/,
-  async function (message: string) {}
+  async function (message: string) {
+    const topicMsgSubmitTx = new TopicMessageSubmitTransaction()
+      .setTopicId(this.topicId)
+      .setMessage(message)
+      .freezeWith(client);
+
+    const topicMsgSubmitTxId = topicMsgSubmitTx.transactionId;
+
+    console.log(
+      "The message submit create transaction ID: ",
+      topicMsgSubmitTxId?.toString()
+    );
+
+    const topicMsgSubmitTxSigned = await topicMsgSubmitTx.sign(this.privKey);
+
+    const topicMsgSubmitTxSubmitted = await topicMsgSubmitTxSigned.execute(
+      client
+    );
+
+    const topicMsgSubmitTxReceipt = await topicMsgSubmitTxSubmitted.getReceipt(
+      client
+    );
+
+    const topicMsgSeqNum = topicMsgSubmitTxReceipt.topicSequenceNumber;
+    console.log("topicMsgSeqNum:", topicMsgSeqNum.toString());
+  }
 );
 
 Then(
