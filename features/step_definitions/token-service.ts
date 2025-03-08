@@ -1,4 +1,10 @@
-import { Given, setDefaultTimeout, Then, When } from "@cucumber/cucumber";
+import {
+  Given,
+  setDefaultTimeout,
+  Then,
+  When,
+  Before,
+} from "@cucumber/cucumber";
 import { accounts } from "../../src/config";
 import {
   AccountBalanceQuery,
@@ -15,6 +21,8 @@ import {
   AccountInfoQuery,
   TransferTransaction,
   TokenAssociateTransaction,
+  Hbar,
+  AccountCreateTransaction,
 } from "@hashgraph/sdk";
 import assert from "node:assert";
 
@@ -22,117 +30,153 @@ setDefaultTimeout(60000);
 
 const client = Client.forTestnet();
 
-const state = {
-  accountId: null as AccountId | null,
-  accountPrivateKey: null as PrivateKey | null,
-  treasuryKey: null as PrivateKey | null,
-  tokenId: null as TokenId | null,
-  fixedTokenId: null as TokenId | null,
-  secondAccountId: null as AccountId | null,
-  secondAccountPrivateKey: null as PrivateKey | null,
-  thirdAccountId: null as AccountId | null,
-  thirdAccountPrivateKey: null as PrivateKey | null,
-  fourthAccountId: null as AccountId | null,
-  fourthAccountPrivateKey: null as PrivateKey | null,
-};
+interface CucumberContext {
+  treasuryAccountId: AccountId;
+  treasuryPrivateKey: PrivateKey;
+  firstAccountId: AccountId | null;
+  firstAccountPrivateKey: PrivateKey | null;
+  tokenId: TokenId | null;
+  secondAccountId: AccountId | null;
+  secondAccountPrivateKey: PrivateKey | null;
+  thirdAccountId: AccountId | null;
+  thirdAccountPrivateKey: PrivateKey | null;
+  fourthAccountId: AccountId | null;
+  fourthAccountPrivateKey: PrivateKey | null;
+  pendingTx: TransferTransaction | null;
+}
+
+Before(async function (this: CucumberContext) {
+  this.treasuryAccountId = AccountId.fromString(accounts[0].id);
+  this.treasuryPrivateKey = PrivateKey.fromStringED25519(
+    accounts[0].privateKey
+  );
+
+  client.setOperator(this.treasuryAccountId, this.treasuryPrivateKey);
+});
 
 Given(
   /^A Hedera account with more than (\d+) hbar$/,
   async function (expectedBalance: number) {
-    const account = accounts[0];
-    state.accountId = AccountId.fromString(account.id);
-    state.accountPrivateKey = PrivateKey.fromStringED25519(account.privateKey);
-    state.treasuryKey = state.accountPrivateKey;
-    client.setOperator(state.accountId, state.accountPrivateKey);
+    this.treasuryAccountId = AccountId.fromString(accounts[0].id);
+    this.treasuryPrivateKey = PrivateKey.fromStringED25519(
+      accounts[0].privateKey
+    );
+    client.setOperator(this.treasuryAccountId, this.treasuryPrivateKey);
 
-    const query = new AccountBalanceQuery().setAccountId(state.accountId);
+    const firstAccountPrivateKey = PrivateKey.generateED25519();
+    const firstAccountPublicKey = firstAccountPrivateKey.publicKey;
+
+    const firstAccountTx = await new AccountCreateTransaction()
+      .setKey(firstAccountPublicKey)
+      .execute(client);
+
+    const firstAccountReceipt = await firstAccountTx.getReceipt(client);
+    this.firstAccountId = firstAccountReceipt.accountId;
+    this.firstAccountPrivateKey = firstAccountPrivateKey;
+
+    const transaction = new TransferTransaction()
+      .addHbarTransfer(this.treasuryAccountId, new Hbar(-(expectedBalance + 1)))
+      .addHbarTransfer(this.firstAccountId, new Hbar(expectedBalance + 1))
+      .freezeWith(client);
+
+    const response = await transaction.execute(client);
+    await response.getReceipt(client);
+
+    const query = new AccountBalanceQuery().setAccountId(this.firstAccountId);
     const balance = await query.execute(client);
+
     assert.ok(balance.hbars.toBigNumber().toNumber() > expectedBalance);
   }
 );
 
-When(/^I create a token named Test Token \(HTT\)$/, async function () {
-  if (!state.treasuryKey || !state.accountId) {
-    throw new Error("Treasury key or account ID is not set");
+When(
+  /^I create a token named Test Token \(HTT\)$/,
+  async function (this: CucumberContext) {
+    if (!this.firstAccountId || !this.firstAccountPrivateKey) {
+      throw new Error("Account ID or private key is not set");
+    }
+
+    const tokenCreateTx = new TokenCreateTransaction({
+      tokenName: "Test Token",
+      tokenSymbol: "HTT",
+      decimals: 2,
+      tokenType: TokenType.FungibleCommon,
+      treasuryAccountId: this.treasuryAccountId,
+      supplyKey: this.treasuryPrivateKey,
+    }).freezeWith(client);
+
+    let response = await tokenCreateTx.execute(client);
+    let receipt = await response.getReceipt(client);
+
+    this.tokenId = receipt.tokenId;
+
+    console.log("Created token with ID: ", receipt.tokenId?.toString());
   }
-
-  const tokenCreateTx = new TokenCreateTransaction({
-    tokenName: "Test Token",
-    tokenSymbol: "HTT",
-    decimals: 2,
-    tokenType: TokenType.FungibleCommon,
-    treasuryAccountId: state.accountId,
-    supplyKey: state.treasuryKey,
-  }).freezeWith(client);
-
-  let response = await tokenCreateTx.execute(client);
-  let receipt = await response.getReceipt(client);
-
-  state.tokenId = receipt.tokenId;
-
-  console.log("Created token with ID: ", receipt.tokenId?.toString());
-});
+);
 
 Then(/^The token has the name "([^"]*)"$/, async function (name) {
-  if (!state.tokenId) {
+  if (!this.tokenId) {
     throw new Error("Token ID is not set");
   }
 
   const tokenInfo = await new TokenInfoQuery({
-    tokenId: state.tokenId,
+    tokenId: this.tokenId,
   }).execute(client);
 
   assert.equal(tokenInfo.name, name);
 });
 
 Then(/^The token has the symbol "([^"]*)"$/, async function (symbol) {
-  if (!state.tokenId) {
+  if (!this.tokenId) {
     throw new Error("Token ID is not set");
   }
 
   const tokenInfo = await new TokenInfoQuery({
-    tokenId: state.tokenId,
+    tokenId: this.tokenId,
   }).execute(client);
 
   assert.equal(tokenInfo.symbol, symbol);
 });
 
 Then(/^The token has (\d+) decimals$/, async function (decimals) {
-  if (!state.tokenId) {
+  if (!this.tokenId) {
     throw new Error("Token ID is not set");
   }
 
   const tokenInfo = await new TokenInfoQuery({
-    tokenId: state.tokenId,
+    tokenId: this.tokenId,
   }).execute(client);
 
   assert.equal(tokenInfo.decimals, decimals);
 });
 
-Then(/^The token is owned by the account$/, async function () {
-  if (!state.tokenId || !state.accountId) {
-    throw new Error("Token ID or account ID is not set");
+Then(
+  /^The token is owned by the account$/,
+  async function (this: CucumberContext) {
+    if (!this.tokenId || !this.firstAccountId) {
+      throw new Error("Token ID or account ID is not set");
+    }
+
+    const tokenInfo = await new TokenInfoQuery({
+      tokenId: this.tokenId,
+    }).execute(client);
+
+    assert.equal(
+      tokenInfo.treasuryAccountId?.toString(),
+      this.treasuryAccountId.toString()
+    );
   }
-
-  const tokenInfo = await new TokenInfoQuery({
-    tokenId: state.tokenId,
-  }).execute(client);
-
-  assert.equal(
-    tokenInfo.treasuryAccountId?.toString(),
-    state.accountId.toString()
-  );
-});
+);
 
 Then(
   /^An attempt to mint (\d+) additional tokens succeeds$/,
   async function (amount) {
-    if (!state.tokenId || !state.accountId) {
+    if (!this.tokenId || !this.firstAccountId) {
       throw new Error("Token ID or account ID is not set");
     }
 
     const tokenMintTx = new TokenMintTransaction({
-      tokenId: state.tokenId,
+      tokenId: this.tokenId,
       amount,
     }).freezeWith(client);
 
@@ -145,9 +189,9 @@ Then(
 
 When(
   /^I create a fixed supply token named Test Token \(HTT\) with (\d+) tokens$/,
-  async function (amount: number) {
-    if (!state.treasuryKey || !state.accountId) {
-      throw new Error("Treasury key or account ID is not set");
+  async function (this: CucumberContext, amount: number) {
+    if (!this.treasuryAccountId) {
+      throw new Error("Account ID is not set");
     }
 
     const tokenCreateTx = new TokenCreateTransaction({
@@ -155,7 +199,7 @@ When(
       tokenSymbol: "HTT",
       decimals: 2,
       tokenType: TokenType.FungibleCommon,
-      treasuryAccountId: state.accountId,
+      treasuryAccountId: this.treasuryAccountId,
       supplyType: TokenSupplyType.Finite,
       maxSupply: amount,
       initialSupply: amount,
@@ -164,7 +208,7 @@ When(
     let response = await tokenCreateTx.execute(client);
     let receipt = await response.getReceipt(client);
 
-    state.fixedTokenId = receipt.tokenId;
+    this.tokenId = receipt.tokenId;
 
     console.log("Created token with ID: ", receipt.tokenId?.toString());
   }
@@ -173,12 +217,12 @@ When(
 Then(
   /^The total supply of the token is (\d+)$/,
   async function (amount: number) {
-    if (!state.fixedTokenId) {
+    if (!this.tokenId) {
       throw new Error("Token ID is not set");
     }
 
     const tokenInfo = await new TokenInfoQuery({
-      tokenId: state.fixedTokenId,
+      tokenId: this.tokenId,
     }).execute(client);
 
     assert.equal(tokenInfo.totalSupply.toString(), amount.toString());
@@ -186,12 +230,12 @@ Then(
 );
 
 Then(/^An attempt to mint tokens fails$/, async function () {
-  if (!state.fixedTokenId || !state.accountId) {
+  if (!this.tokenId || !this.firstAccountId) {
     throw new Error("Token ID or account ID is not set");
   }
 
   const tokenMintTx = new TokenMintTransaction({
-    tokenId: state.fixedTokenId,
+    tokenId: this.tokenId,
     amount: 1,
   }).freezeWith(client);
 
@@ -203,12 +247,34 @@ Then(/^An attempt to mint tokens fails$/, async function () {
 Given(
   /^A first hedera account with more than (\d+) hbar$/,
   async function (expectedBalance: number) {
-    if (!state.accountId) {
-      throw new Error("Token ID or account ID is not set");
-    }
+    this.treasuryAccountId = AccountId.fromString(accounts[0].id);
+    this.treasuryPrivateKey = PrivateKey.fromStringED25519(
+      accounts[0].privateKey
+    );
+    client.setOperator(this.treasuryAccountId, this.treasuryPrivateKey);
+
+    const firstAccountPrivateKey = PrivateKey.generateED25519();
+    const firstAccountPublicKey = firstAccountPrivateKey.publicKey;
+
+    const firstAccountTx = await new AccountCreateTransaction()
+      .setKey(firstAccountPublicKey)
+      .execute(client);
+
+    const firstAccountReceipt = await firstAccountTx.getReceipt(client);
+
+    this.firstAccountId = firstAccountReceipt.accountId!;
+    this.firstAccountPrivateKey = firstAccountPrivateKey;
+
+    const transaction = new TransferTransaction()
+      .addHbarTransfer(this.treasuryAccountId, new Hbar(-(expectedBalance + 1)))
+      .addHbarTransfer(this.firstAccountId, new Hbar(expectedBalance + 1))
+      .freezeWith(client);
+
+    const response = await transaction.execute(client);
+    await response.getReceipt(client);
 
     const query = new AccountBalanceQuery({
-      accountId: state.accountId,
+      accountId: this.firstAccountId,
     });
 
     const balance = await query.execute(client);
@@ -217,53 +283,103 @@ Given(
 );
 
 Given(/^A second Hedera account$/, async function () {
-  const account = accounts[1];
-  state.secondAccountId = AccountId.fromString(account.id);
-  state.secondAccountPrivateKey = PrivateKey.fromStringED25519(
-    account.privateKey
-  );
+  const secondAccountPrivateKey = PrivateKey.generateED25519();
+  const secondAccountPublicKey = secondAccountPrivateKey.publicKey;
+
+  const secondAccountTx = await new AccountCreateTransaction()
+    .setKey(secondAccountPublicKey)
+    .execute(client);
+
+  const secondAccountReceipt = await secondAccountTx.getReceipt(client);
+  this.secondAccountId = secondAccountReceipt.accountId!;
+  this.secondAccountPrivateKey = secondAccountPrivateKey;
+
+  if (!this.secondAccountId || !this.secondAccountPrivateKey) {
+    throw new Error("Second account was not properly initialized");
+  }
 });
 
 Given(
   /^A token named Test Token \(HTT\) with (\d+) tokens$/,
-  async function (initialSupply: number) {
-    if (!state.fixedTokenId) {
-      throw new Error("Fixed token is not set");
+  async function (this: CucumberContext, initialSupply: number) {
+    if (!this.treasuryAccountId) {
+      throw new Error("Account ID is not set");
     }
 
-    const tokenInfo = await new TokenInfoQuery({
-      tokenId: state.fixedTokenId,
-    }).execute(client);
+    const tokenCreateTx = new TokenCreateTransaction({
+      tokenName: "Test Token",
+      tokenSymbol: "HTT",
+      decimals: 2,
+      tokenType: TokenType.FungibleCommon,
+      treasuryAccountId: this.treasuryAccountId,
+      supplyType: TokenSupplyType.Finite,
+      maxSupply: initialSupply,
+      initialSupply: initialSupply,
+    }).freezeWith(client);
 
-    assert.equal(tokenInfo.totalSupply.toString(), initialSupply.toString());
-    assert.equal(tokenInfo.symbol, "HTT");
-    assert.equal(tokenInfo.name, "Test Token");
+    let response = await tokenCreateTx.execute(client);
+    let receipt = await response.getReceipt(client);
+
+    this.tokenId = receipt.tokenId;
+
+    console.log("Created token with ID: ", receipt.tokenId?.toString());
   }
 );
 
 Given(
   /^The first account holds (\d+) HTT tokens$/,
   async function (amount: number) {
-    if (
-      !state.fixedTokenId ||
-      !state.accountId ||
-      !state.accountPrivateKey ||
-      !state.secondAccountId
-    ) {
+    if (!this.tokenId || !this.firstAccountId || !this.firstAccountPrivateKey) {
       throw new Error(
         "Token ID, account ID, or account private key is not set"
       );
     }
 
+    const accountInfo = await new AccountInfoQuery({
+      accountId: this.firstAccountId,
+    }).execute(client);
+
+    if (!accountInfo.tokenRelationships.get(this.tokenId)) {
+      const tx = new TokenAssociateTransaction({
+        tokenIds: [this.tokenId],
+        accountId: this.firstAccountId,
+      }).freezeWith(client);
+
+      const signTx = await tx.sign(this.firstAccountPrivateKey);
+
+      const assocResponse = await signTx.execute(client);
+      await assocResponse.getReceipt(client);
+    }
+
     const query = new AccountBalanceQuery({
-      accountId: state.accountId,
+      accountId: this.firstAccountId,
     });
 
     const balance = await query.execute(client);
+    const currentBalance = balance.tokens?.get(this.tokenId)?.toNumber() || 0;
 
-    const b = balance.tokens?.get(state.fixedTokenId);
+    const amountToTransfer = amount - currentBalance;
 
-    assert.ok(balance.tokens?.get(state.fixedTokenId).toNumber() > amount);
+    if (amountToTransfer !== 0) {
+      const transaction = new TransferTransaction()
+        .addTokenTransfer(
+          this.tokenId,
+          this.treasuryAccountId,
+          -amountToTransfer
+        )
+        .addTokenTransfer(this.tokenId, this.firstAccountId, amountToTransfer)
+        .freezeWith(client);
+
+      const signTx = await transaction.sign(this.treasuryPrivateKey);
+      const response = await signTx.execute(client);
+      const receipt = await response.getReceipt(client);
+
+      assert.equal(receipt.status, Status.Success);
+    } else {
+      console.log(
+        "No transfer needed, account already has sufficient balance."
+      );
+    }
   }
 );
 
@@ -271,10 +387,10 @@ Given(
   /^The second account holds (\d+) HTT tokens$/,
   async function (tokenAmount: number) {
     if (
-      !state.fixedTokenId ||
-      !state.accountId ||
-      !state.secondAccountPrivateKey ||
-      !state.secondAccountId
+      !this.tokenId ||
+      !this.firstAccountId ||
+      !this.secondAccountPrivateKey ||
+      !this.secondAccountId
     ) {
       throw new Error(
         "Token ID, account ID, or account private key is not set"
@@ -282,35 +398,50 @@ Given(
     }
 
     const accountInfo = await new AccountInfoQuery({
-      accountId: state.secondAccountId,
+      accountId: this.secondAccountId,
     }).execute(client);
 
-    if (!accountInfo.tokenRelationships.get(state.fixedTokenId)) {
+    if (!accountInfo.tokenRelationships.get(this.tokenId)) {
       const tx = new TokenAssociateTransaction({
-        tokenIds: [state.fixedTokenId],
-        accountId: state.secondAccountId,
+        tokenIds: [this.tokenId],
+        accountId: this.secondAccountId,
       }).freezeWith(client);
 
-      const signTx = await tx.sign(state.secondAccountPrivateKey);
+      const signTx = await tx.sign(this.secondAccountPrivateKey);
 
       const assocResponse = await signTx.execute(client);
-      const assocReceipt = await assocResponse.getReceipt(client);
+      await assocResponse.getReceipt(client);
     }
 
     const accountBalanceQuery = new AccountBalanceQuery({
-      accountId: state.secondAccountId,
+      accountId: this.secondAccountId,
     });
 
     const balance = await accountBalanceQuery.execute(client);
+    const currentBalance = balance.tokens?.get(this.tokenId)?.toNumber() || 0;
 
-    console.log(
-      balance.tokens?.get(state.fixedTokenId)?.toNumber(),
-      tokenAmount
-    );
+    const amountToTransfer = tokenAmount - currentBalance;
 
-    assert.ok(
-      balance.tokens?.get(state.fixedTokenId)?.toNumber() === tokenAmount
-    );
+    if (amountToTransfer !== 0) {
+      const transaction = new TransferTransaction()
+        .addTokenTransfer(
+          this.tokenId,
+          this.treasuryAccountId,
+          -amountToTransfer
+        )
+        .addTokenTransfer(this.tokenId, this.secondAccountId, amountToTransfer)
+        .freezeWith(client);
+
+      const signTx = await transaction.sign(this.treasuryPrivateKey);
+      const response = await signTx.execute(client);
+      const receipt = await response.getReceipt(client);
+
+      assert.equal(receipt.status, Status.Success);
+    } else {
+      console.log(
+        "No transfer needed, second account already has sufficient balance."
+      );
+    }
   }
 );
 
@@ -319,42 +450,46 @@ When(
   async function (amount: number) {
     console.log({ amount });
 
-    if (!state.fixedTokenId || !state.accountId || !state.secondAccountId) {
+    if (!this.tokenId || !this.firstAccountId || !this.secondAccountId) {
       throw new Error("Token ID or account IDs are not set");
     }
 
     const transaction = new TransferTransaction({
       tokenTransfers: [
         {
-          tokenId: state.fixedTokenId,
+          tokenId: this.tokenId,
           amount: -amount,
-          accountId: state.accountId,
+          accountId: this.firstAccountId,
         },
         {
-          tokenId: state.fixedTokenId,
+          tokenId: this.tokenId,
           amount: amount,
-          accountId: state.secondAccountId,
+          accountId: this.secondAccountId,
         },
       ],
     }).freezeWith(client);
 
-    let response = await transaction.execute(client);
-    let receipt = await response.getReceipt(client);
-
-    assert.equal(receipt.status, Status.Success);
+    this.pendingTx = await transaction.sign(this.firstAccountPrivateKey);
   }
 );
 
-When(/^The first account submits the transaction$/, async function () {});
+When(/^The first account submits the transaction$/, async function () {
+  const p = this.pendingTx;
+
+  let response = await p.execute(client);
+  let receipt = await response.getReceipt(client);
+
+  assert.equal(receipt.status, Status.Success);
+});
 
 When(
   /^The second account creates a transaction to transfer (\d+) HTT tokens to the first account$/,
   async function (amount: number) {
     if (
-      !state.fixedTokenId ||
-      !state.accountId ||
-      !state.secondAccountId ||
-      !state.secondAccountPrivateKey
+      !this.tokenId ||
+      !this.firstAccountId ||
+      !this.secondAccountId ||
+      !this.secondAccountPrivateKey
     ) {
       throw new Error("Token ID, account IDs, or private key is not set");
     }
@@ -362,33 +497,29 @@ When(
     const transaction = new TransferTransaction({
       tokenTransfers: [
         {
-          tokenId: state.fixedTokenId,
+          tokenId: this.tokenId,
           amount: -amount,
-          accountId: state.secondAccountId,
+          accountId: this.secondAccountId,
         },
         {
-          tokenId: state.fixedTokenId,
+          tokenId: this.tokenId,
           amount: amount,
-          accountId: state.accountId,
+          accountId: this.firstAccountId,
         },
       ],
     }).freezeWith(client);
 
-    const signTx = await transaction.sign(state.secondAccountPrivateKey);
-    let response = await signTx.execute(client);
-    let receipt = await response.getReceipt(client);
-
-    assert.equal(receipt.status, Status.Success);
+    this.pendingTx = await transaction.sign(this.secondAccountPrivateKey);
   }
 );
 
 Then(/^The first account has paid for the transaction fee$/, async function () {
-  if (!state.accountId) {
+  if (!this.firstAccountId) {
     throw new Error("Account ID is not set");
   }
 
   const accountInfo = await new AccountInfoQuery({
-    accountId: state.accountId,
+    accountId: this.firstAccountId,
   }).execute(client);
 
   assert.ok(accountInfo.isDeleted === false);
@@ -397,104 +528,286 @@ Then(/^The first account has paid for the transaction fee$/, async function () {
 Given(
   /^A first hedera account with more than (\d+) hbar and (\d+) HTT tokens$/,
   async function (hbarAmount: number, tokenAmount: number) {
-    if (!state.accountId || !state.fixedTokenId) {
-      throw new Error("Account ID or token ID is not set");
+    const firstAccountPrivateKey = PrivateKey.generateED25519();
+    const firstAccountPublicKey = firstAccountPrivateKey.publicKey;
+
+    const firstAccountTx = await new AccountCreateTransaction()
+      .setKey(firstAccountPublicKey)
+      .execute(client);
+
+    const firstAccountReceipt = await firstAccountTx.getReceipt(client);
+
+    this.firstAccountId = firstAccountReceipt.accountId;
+    this.firstAccountPrivateKey = firstAccountPrivateKey;
+
+    if (!this.tokenId || !this.firstAccountId) {
+      throw new Error("Token ID or first account ID is not set");
     }
 
-    const query = new AccountBalanceQuery({
-      accountId: state.accountId,
+    const accountInfo = await new AccountInfoQuery({
+      accountId: this.firstAccountId,
+    }).execute(client);
+
+    if (!accountInfo.tokenRelationships.get(this.tokenId)) {
+      const tx = new TokenAssociateTransaction({
+        tokenIds: [this.tokenId],
+        accountId: this.firstAccountId,
+      }).freezeWith(client);
+
+      const signTx = await tx.sign(this.firstAccountPrivateKey);
+      await (await signTx.execute(client)).getReceipt(client);
+    }
+
+    const balanceQuery = new AccountBalanceQuery({
+      accountId: this.firstAccountId,
     });
 
-    const balance = await query.execute(client);
+    let balance = await balanceQuery.execute(client);
+    const currentHbarBalance = balance.hbars.toBigNumber().toNumber();
+    const currentTokenBalance =
+      balance.tokens?.get(this.tokenId)?.toNumber() || 0;
 
-    assert.ok(balance.hbars.toBigNumber().toNumber() > hbarAmount);
-    assert.ok(
-      balance.tokens?.get(state.fixedTokenId)?.toBigNumber().toNumber() >=
-        tokenAmount
-    );
+    const hbarDiff = hbarAmount - currentHbarBalance;
+    const tokenDiff = tokenAmount - currentTokenBalance;
+
+    if (hbarDiff !== 0) {
+      const hbarTransfer = new TransferTransaction()
+        .addHbarTransfer(this.treasuryAccountId, new Hbar(-hbarDiff))
+        .addHbarTransfer(this.firstAccountId, new Hbar(hbarDiff))
+        .freezeWith(client);
+
+      const hbarResponse = await hbarTransfer.execute(client);
+      await hbarResponse.getReceipt(client);
+    }
+
+    if (tokenDiff !== 0) {
+      const tokenTransfer = new TransferTransaction()
+        .addTokenTransfer(this.tokenId, this.treasuryAccountId, -tokenDiff)
+        .addTokenTransfer(this.tokenId, this.firstAccountId, tokenDiff)
+        .freezeWith(client);
+
+      const tokenResponse = await tokenTransfer.execute(client);
+      await tokenResponse.getReceipt(client);
+    }
+
+    balance = await balanceQuery.execute(client);
+
+    assert.ok(balance.hbars.toBigNumber().toNumber() === hbarAmount);
+    assert.ok(balance.tokens?.get(this.tokenId)?.toNumber() === tokenAmount);
   }
 );
 
 Given(
   /^A second Hedera account with (\d+) hbar and (\d+) HTT tokens$/,
   async function (hbarAmount: number, tokenAmount: number) {
-    if (!state.secondAccountId || !state.fixedTokenId) {
-      throw new Error("Second account ID or token ID is not set");
+    const secondAccountPrivateKey = PrivateKey.generateED25519();
+    const secondAccountPublicKey = secondAccountPrivateKey.publicKey;
+
+    const secondAccountTx = await new AccountCreateTransaction()
+      .setKey(secondAccountPublicKey)
+      .execute(client);
+
+    const secondAccountReceipt = await secondAccountTx.getReceipt(client);
+
+    this.secondAccountId = secondAccountReceipt.accountId;
+    this.secondAccountPrivateKey = secondAccountPrivateKey;
+
+    if (!this.tokenId || !this.secondAccountId) {
+      throw new Error("Token ID or first account ID is not set");
     }
 
-    const query = new AccountBalanceQuery({
-      accountId: state.secondAccountId,
+    const accountInfo = await new AccountInfoQuery({
+      accountId: this.secondAccountId,
+    }).execute(client);
+
+    if (!accountInfo.tokenRelationships.get(this.tokenId)) {
+      const tx = new TokenAssociateTransaction({
+        tokenIds: [this.tokenId],
+        accountId: this.secondAccountId,
+      }).freezeWith(client);
+
+      const signTx = await tx.sign(this.secondAccountPrivateKey);
+      await (await signTx.execute(client)).getReceipt(client);
+    }
+
+    const balanceQuery = new AccountBalanceQuery({
+      accountId: this.secondAccountId,
     });
 
-    const balance = await query.execute(client);
+    let balance = await balanceQuery.execute(client);
+    const currentHbarBalance = balance.hbars.toBigNumber().toNumber();
+    const currentTokenBalance =
+      balance.tokens?.get(this.tokenId)?.toNumber() || 0;
 
-    assert.ok(balance.hbars.toBigNumber().toNumber() >= hbarAmount);
-    assert.ok(
-      balance.tokens?.get(state.fixedTokenId)?.toBigNumber().toNumber() >=
-        tokenAmount
-    );
+    const hbarDiff = hbarAmount - currentHbarBalance;
+    const tokenDiff = tokenAmount - currentTokenBalance;
+
+    if (hbarDiff !== 0) {
+      const hbarTransfer = new TransferTransaction()
+        .addHbarTransfer(this.treasuryAccountId, new Hbar(-hbarDiff))
+        .addHbarTransfer(this.secondAccountId, new Hbar(hbarDiff))
+        .freezeWith(client);
+
+      const hbarResponse = await hbarTransfer.execute(client);
+      await hbarResponse.getReceipt(client);
+    }
+
+    if (tokenDiff !== 0) {
+      const tokenTransfer = new TransferTransaction()
+        .addTokenTransfer(this.tokenId, this.treasuryAccountId, -tokenDiff)
+        .addTokenTransfer(this.tokenId, this.secondAccountId, tokenDiff)
+        .freezeWith(client);
+
+      const tokenResponse = await tokenTransfer.execute(client);
+      await tokenResponse.getReceipt(client);
+    }
+
+    balance = await balanceQuery.execute(client);
+
+    assert.ok(balance.hbars.toBigNumber().toNumber() === hbarAmount);
+    assert.ok(balance.tokens?.get(this.tokenId)?.toNumber() === tokenAmount);
   }
 );
 
 Given(
   /^A third Hedera account with (\d+) hbar and (\d+) HTT tokens$/,
   async function (hbarAmount: number, tokenAmount: number) {
-    const account = accounts[2];
-    state.thirdAccountId = AccountId.fromString(account.id);
-    state.thirdAccountPrivateKey = PrivateKey.fromStringED25519(
-      account.privateKey
-    );
+    const thirdAccountPrivateKey = PrivateKey.generateED25519();
+    const thirdAccountPublicKey = thirdAccountPrivateKey.publicKey;
 
-    if (!state.fixedTokenId) {
-      throw new Error("Token ID is not set");
+    const thirdAccountTx = await new AccountCreateTransaction()
+      .setKey(thirdAccountPublicKey)
+      .execute(client);
+
+    const thirdAccountReceipt = await thirdAccountTx.getReceipt(client);
+    this.thirdAccountId = thirdAccountReceipt.accountId!;
+    this.thirdAccountPrivateKey = thirdAccountPrivateKey;
+
+    if (!this.tokenId || !this.thirdAccountId) {
+      throw new Error("Token ID or third account ID is not set");
     }
 
-    const tx = new TokenAssociateTransaction({
-      tokenIds: [state.fixedTokenId],
-      accountId: state.thirdAccountId,
-    }).freezeWith(client);
+    const accountInfo = await new AccountInfoQuery({
+      accountId: this.thirdAccountId,
+    }).execute(client);
 
-    const signTx = await tx.sign(state.thirdAccountPrivateKey);
-    await (await signTx.execute(client)).getReceipt(client);
+    if (!accountInfo.tokenRelationships.get(this.tokenId)) {
+      const tx = new TokenAssociateTransaction({
+        tokenIds: [this.tokenId],
+        accountId: this.thirdAccountId,
+      }).freezeWith(client);
 
-    const query = new AccountBalanceQuery({
-      accountId: state.thirdAccountId,
+      const signTx = await tx.sign(this.thirdAccountPrivateKey);
+      await (await signTx.execute(client)).getReceipt(client);
+    }
+
+    const balanceQuery = new AccountBalanceQuery({
+      accountId: this.thirdAccountId,
     });
 
-    const balance = await query.execute(client);
+    let balance = await balanceQuery.execute(client);
+    const currentHbarBalance = balance.hbars.toBigNumber().toNumber();
+    const currentTokenBalance =
+      balance.tokens?.get(this.tokenId)?.toNumber() || 0;
 
-    assert.ok(balance.hbars.toBigNumber().toNumber() >= hbarAmount);
+    const hbarDiff = hbarAmount - currentHbarBalance;
+    const tokenDiff = tokenAmount - currentTokenBalance;
+
+    if (hbarDiff !== 0) {
+      const hbarTransfer = new TransferTransaction()
+        .addHbarTransfer(this.treasuryAccountId, new Hbar(-hbarDiff))
+        .addHbarTransfer(this.thirdAccountId, new Hbar(hbarDiff))
+        .freezeWith(client);
+
+      const hbarResponse = await hbarTransfer.execute(client);
+      await hbarResponse.getReceipt(client);
+    }
+
+    if (tokenDiff !== 0) {
+      const tokenTransfer = new TransferTransaction()
+        .addTokenTransfer(this.tokenId, this.treasuryAccountId, -tokenDiff)
+        .addTokenTransfer(this.tokenId, this.thirdAccountId, tokenDiff)
+        .freezeWith(client);
+
+      const tokenResponse = await tokenTransfer.execute(client);
+      await tokenResponse.getReceipt(client);
+    }
+
+    balance = await balanceQuery.execute(client);
+
+    assert.ok(balance.hbars.toBigNumber().toNumber() === hbarAmount);
+    assert.ok(balance.tokens?.get(this.tokenId)?.toNumber() === tokenAmount);
   }
 );
 
 Given(
   /^A fourth Hedera account with (\d+) hbar and (\d+) HTT tokens$/,
   async function (hbarAmount: number, tokenAmount: number) {
-    const account = accounts[3];
-    state.fourthAccountId = AccountId.fromString(account.id);
-    state.fourthAccountPrivateKey = PrivateKey.fromStringED25519(
-      account.privateKey
-    );
+    const fourthAccountPrivateKey = PrivateKey.generateED25519();
+    const fourthAccountPublicKey = fourthAccountPrivateKey.publicKey;
 
-    if (!state.fixedTokenId) {
-      throw new Error("Token ID is not set");
+    const fourthAccountTx = await new AccountCreateTransaction()
+      .setKey(fourthAccountPublicKey)
+      .execute(client);
+
+    const fourthAccountReceipt = await fourthAccountTx.getReceipt(client);
+    this.fourthAccountId = fourthAccountReceipt.accountId!;
+    this.fourthAccountPrivateKey = fourthAccountPrivateKey;
+
+    if (!this.tokenId || !this.fourthAccountId) {
+      throw new Error("Token ID or fourth account ID is not set");
     }
 
-    const tx = new TokenAssociateTransaction({
-      tokenIds: [state.fixedTokenId],
-      accountId: state.fourthAccountId,
-    }).freezeWith(client);
+    const accountInfo = await new AccountInfoQuery({
+      accountId: this.fourthAccountId,
+    }).execute(client);
 
-    const signTx = await tx.sign(state.fourthAccountPrivateKey);
-    await (await signTx.execute(client)).getReceipt(client);
+    if (!accountInfo.tokenRelationships.get(this.tokenId)) {
+      const tx = new TokenAssociateTransaction({
+        tokenIds: [this.tokenId],
+        accountId: this.fourthAccountId,
+      }).freezeWith(client);
 
-    const query = new AccountBalanceQuery({
-      accountId: state.fourthAccountId,
+      const signTx = await tx.sign(this.fourthAccountPrivateKey);
+      await (await signTx.execute(client)).getReceipt(client);
+    }
+
+    const balanceQuery = new AccountBalanceQuery({
+      accountId: this.fourthAccountId,
     });
 
-    const balance = await query.execute(client);
+    let balance = await balanceQuery.execute(client);
+    const currentHbarBalance = balance.hbars.toBigNumber().toNumber();
+    const currentTokenBalance =
+      balance.tokens?.get(this.tokenId)?.toNumber() || 0;
 
-    assert.ok(balance.hbars.toBigNumber().toNumber() >= hbarAmount);
+    const hbarDiff = hbarAmount - currentHbarBalance;
+    const tokenDiff = tokenAmount - currentTokenBalance;
+
+    if (hbarDiff !== 0) {
+      const hbarTransfer = new TransferTransaction()
+        .addHbarTransfer(this.treasuryAccountId, new Hbar(-hbarDiff))
+        .addHbarTransfer(this.fourthAccountId, new Hbar(hbarDiff))
+        .freezeWith(client);
+
+      const hbarResponse = await hbarTransfer.execute(client);
+      await hbarResponse.getReceipt(client);
+    }
+
+    if (tokenDiff !== 0) {
+      const tokenTransfer = new TransferTransaction()
+        .addTokenTransfer(this.tokenId, this.treasuryAccountId, -tokenDiff)
+        .addTokenTransfer(this.tokenId, this.fourthAccountId, tokenDiff)
+        .freezeWith(client);
+
+      const tokenResponse = await tokenTransfer.execute(client);
+      await tokenResponse.getReceipt(client);
+    }
+
+    balance = await balanceQuery.execute(client);
+
+    assert.ok(balance.hbars.toBigNumber().toNumber() === hbarAmount);
+    assert.ok(balance.tokens?.get(this.tokenId)?.toNumber() === tokenAmount);
   }
 );
 
@@ -502,13 +815,13 @@ When(
   /^A transaction is created to transfer (\d+) HTT tokens out of the first and second account and (\d+) HTT tokens into the third account and (\d+) HTT tokens into the fourth account$/,
   async function (amount1: number, amount3: number, amount4: number) {
     if (
-      !state.fixedTokenId ||
-      !state.accountId ||
-      !state.secondAccountId ||
-      !state.thirdAccountId ||
-      !state.fourthAccountId ||
-      !state.accountPrivateKey ||
-      !state.secondAccountPrivateKey
+      !this.tokenId ||
+      !this.firstAccountId ||
+      !this.secondAccountId ||
+      !this.thirdAccountId ||
+      !this.fourthAccountId ||
+      !this.firstAccountPrivateKey ||
+      !this.secondAccountPrivateKey
     ) {
       throw new Error("Required accounts or token information is not set");
     }
@@ -516,75 +829,64 @@ When(
     const transaction = new TransferTransaction({
       tokenTransfers: [
         {
-          tokenId: state.fixedTokenId,
+          tokenId: this.tokenId,
           amount: -amount1,
-          accountId: state.accountId,
+          accountId: this.firstAccountId,
         },
         {
-          tokenId: state.fixedTokenId,
+          tokenId: this.tokenId,
           amount: -amount1,
-          accountId: state.secondAccountId,
+          accountId: this.secondAccountId,
         },
         {
-          tokenId: state.fixedTokenId,
+          tokenId: this.tokenId,
           amount: amount3,
-          accountId: state.thirdAccountId,
+          accountId: this.thirdAccountId,
         },
         {
-          tokenId: state.fixedTokenId,
+          tokenId: this.tokenId,
           amount: amount4,
-          accountId: state.fourthAccountId,
+          accountId: this.fourthAccountId,
         },
       ],
     }).freezeWith(client);
 
     // Sign with both sending accounts
-    let signTx = await transaction.sign(state.accountPrivateKey);
-    signTx = await signTx.sign(state.secondAccountPrivateKey);
-
-    let response = await signTx.execute(client);
-    let receipt = await response.getReceipt(client);
-
-    assert.equal(receipt.status, Status.Success);
+    let signTx = await transaction.sign(this.firstAccountPrivateKey);
+    this.pendingTx = await signTx.sign(this.secondAccountPrivateKey);
   }
 );
 
 Then(
   /^The third account holds (\d+) HTT tokens$/,
   async function (amount: number) {
-    if (!state.fixedTokenId || !state.thirdAccountId) {
+    if (!this.tokenId || !this.thirdAccountId) {
       throw new Error("Token ID or third account ID is not set");
     }
 
     const query = new AccountBalanceQuery({
-      accountId: state.thirdAccountId,
+      accountId: this.thirdAccountId,
     });
 
     const balance = await query.execute(client);
 
-    assert.equal(
-      balance.tokens?.get(state.fixedTokenId)?.toBigNumber().toNumber(),
-      amount
-    );
+    assert.equal(balance.tokens?.get(this.tokenId)?.toNumber(), amount);
   }
 );
 
 Then(
   /^The fourth account holds (\d+) HTT tokens$/,
   async function (amount: number) {
-    if (!state.fixedTokenId || !state.fourthAccountId) {
+    if (!this.tokenId || !this.fourthAccountId) {
       throw new Error("Token ID or fourth account ID is not set");
     }
 
     const query = new AccountBalanceQuery({
-      accountId: state.fourthAccountId,
+      accountId: this.fourthAccountId,
     });
 
     const balance = await query.execute(client);
 
-    assert.equal(
-      balance.tokens?.get(state.fixedTokenId)?.toBigNumber().toNumber(),
-      amount
-    );
+    assert.equal(balance.tokens?.get(this.tokenId)?.toNumber(), amount);
   }
 );
